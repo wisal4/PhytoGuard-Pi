@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.tflite
+*.h5
+*.pt
+.env
+.DS_Store
+*.log
+data/raw/
