@@ -1,8 +1,12 @@
 import cv2
 import numpy as np
-import tensorflow as tf
+import os
+import sys
 
-# ─── 1. CAPTURE (image stockée) ───────────────────────────────
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from cv.pipeline_cv import apply_clahe, apply_grabcut, check_quality
+
+# ─── 1. CAPTURE ───────────────────────────────────────────────
 def capture_image(image_path):
     image = cv2.imread(image_path)
     if image is None:
@@ -10,8 +14,13 @@ def capture_image(image_path):
     print(f"[OK] Image chargée : {image.shape}")
     return image
 
-# ─── 2. PRÉTRAITEMENT (simplifié, sera remplacé par B) ────────
+# ─── 2. PRÉTRAITEMENT (pipeline réel de B) ────────────────────
 def preprocess(image):
+    nette, score = check_quality(image)
+    if not nette:
+        print(f"[ATTENTION] Image floue (score: {score:.2f})")
+    image = apply_clahe(image)
+    image, mask = apply_grabcut(image)
     image = cv2.resize(image, (224, 224))
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image = image.astype(np.float32) / 255.0
