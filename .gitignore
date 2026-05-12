@@ -10,3 +10,5 @@ __pycache__/
 .DS_Store
 *.log
 data/raw/
+data/temp_upload.jpg
+data/test_feuille.jpg
