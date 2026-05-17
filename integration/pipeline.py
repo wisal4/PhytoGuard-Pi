@@ -4,7 +4,12 @@ import os
 import sys
 import sqlite3
 import json
-import tensorflow as tf
+try:
+    from ai_edge_litert.interpreter import Interpreter as TFLiteInterpreter
+    USE_LITERT = True
+except ImportError:
+    import tensorflow as tf
+    USE_LITERT = False
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from cv.pipeline_cv import apply_clahe, apply_grabcut, check_quality
@@ -54,7 +59,10 @@ def preprocess(image):
 
 # ─── 3. INFÉRENCE (vrai modèle TFLite de A) ───────────────────
 def inference(image):
-    interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+    if USE_LITERT:
+        interpreter = TFLiteInterpreter(model_path=MODEL_PATH)
+    else:
+        interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
     input_details  = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
@@ -68,7 +76,6 @@ def inference(image):
     ]
     print(f"[OK] Inférence réelle : {resultats[0]['maladie']}")
     return resultats
-
 # ─── 4. SAUVEGARDE SQLite ─────────────────────────────────────
 def save_to_db(resultats, image_path, latitude=None, longitude=None):
     conn = sqlite3.connect(DB_PATH)
