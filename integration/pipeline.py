@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import os
 import sys
+import sqlite3
+import json
 import tensorflow as tf
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -26,6 +28,7 @@ CLASS_NAMES = [
 ]
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "phytoguard_int8.tflite")
+DB_PATH    = os.path.join(os.path.dirname(__file__), "..", "backend", "phytoguard.db")
 
 # ─── 1. CAPTURE ───────────────────────────────────────────────
 def capture_image(image_path):
@@ -53,7 +56,7 @@ def preprocess(image):
 def inference(image):
     interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
-    input_details = interpreter.get_input_details()
+    input_details  = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
     interpreter.set_tensor(input_details[0]['index'], image)
     interpreter.invoke()
@@ -66,15 +69,50 @@ def inference(image):
     print(f"[OK] Inférence réelle : {resultats[0]['maladie']}")
     return resultats
 
-# ─── 4. PIPELINE COMPLET ──────────────────────────────────────
-def run_pipeline(image_path):
+# ─── 4. SAUVEGARDE SQLite ─────────────────────────────────────
+def save_to_db(resultats, image_path, latitude=None, longitude=None):
+    conn = sqlite3.connect(DB_PATH)
+    top1 = resultats[0]
+    culture = top1["maladie"].split("___")[0]
+    maladie = top1["maladie"].split("___")[1] if "___" in top1["maladie"] else top1["maladie"]
+    cursor = conn.execute(
+        """
+        INSERT INTO diagnostics (culture, maladie, confiance, top3, image_path)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            culture,
+            maladie,
+            top1["confiance"],
+            json.dumps(resultats),
+            image_path,
+        )
+    )
+    diagnostic_id = cursor.lastrowid
+    if latitude and longitude:
+        conn.execute(
+            "INSERT INTO geolocalisations (diagnostic_id, latitude, longitude) VALUES (?, ?, ?)",
+            (diagnostic_id, latitude, longitude)
+        )
+    conn.commit()
+    conn.close()
+    print(f"[OK] Diagnostic sauvegardé en base (id={diagnostic_id})")
+    return diagnostic_id
+
+# ─── 5. PIPELINE COMPLET ──────────────────────────────────────
+def run_pipeline(image_path, latitude=None, longitude=None):
     image = capture_image(image_path)
     image_preprocessed = preprocess(image)
     resultats = inference(image_preprocessed)
+    save_to_db(resultats, image_path, latitude, longitude)
     return resultats
 
 if __name__ == "__main__":
-    resultats = run_pipeline("data/test_feuille.jpg")
+    resultats = run_pipeline(
+        "data/feuille_01.jpg",
+        latitude=34.0209,
+        longitude=-6.8416
+    )
     print("\n=== RÉSULTATS ===")
     for r in resultats:
         print(f"{r['maladie']} : {r['confiance']*100:.1f}%")
