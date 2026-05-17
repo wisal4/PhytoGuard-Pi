@@ -1,0 +1,24 @@
+# PhytoGuard-Pi — Requirements
+# Membre C | Semaine 5
+# Installation : pip install -r requirements.txt --break-system-packages
+
+# ── Serveur Web ──
+flask>=3.1.0
+
+# ── Génération PDF ──
+reportlab>=4.0.0
+pillow>=9.0.0
+
+# ── Alertes SMS ──
+twilio>=9.0.0
+
+# ── Machine Learning ──
+tflite-runtime>=2.14.0   # Sur Raspberry Pi
+# tensorflow>=2.14.0     # Sur PC (décommenter si besoin)
+
+# ── Vision par ordinateur ──
+opencv-python>=4.9.0
+numpy>=1.24.0
+
+# ── Utilitaires ──
+requests>=2.28.0
