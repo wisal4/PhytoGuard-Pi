@@ -4,15 +4,17 @@ import os
 import sys
 import sqlite3
 import json
+
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from cv.pipeline_cv import apply_clahe, apply_grabcut, check_quality
+
+# ─── Import TFLite (compatible PC et Pi) ──────────────────────
 try:
     from ai_edge_litert.interpreter import Interpreter as TFLiteInterpreter
     USE_LITERT = True
 except ImportError:
     import tensorflow as tf
     USE_LITERT = False
-
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from cv.pipeline_cv import apply_clahe, apply_grabcut, check_quality
 
 CLASS_NAMES = [
     "Apple___Apple_scab", "Apple___Black_rot", "Apple___Cedar_apple_rust",
@@ -35,11 +37,23 @@ CLASS_NAMES = [
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "phytoguard_int8.tflite")
 DB_PATH    = os.path.join(os.path.dirname(__file__), "..", "backend", "phytoguard.db")
 
-# ─── 1. CAPTURE ───────────────────────────────────────────────
+# ─── 1. CAPTURE + redimensionnement automatique ───────────────
 def capture_image(image_path):
+    # Bug fix 1 : accepter .jpeg et .jpg
+    if not os.path.exists(image_path):
+        jpeg_path = image_path.replace(".jpg", ".jpeg")
+        if os.path.exists(jpeg_path):
+            image_path = jpeg_path
+        else:
+            raise FileNotFoundError(f"Image introuvable : {image_path}")
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Image introuvable : {image_path}")
+    # Bug fix 2 : redimensionner si trop grande (évite Killed sur Pi)
+    h, w = image.shape[:2]
+    if w > 1024 or h > 1024:
+        image = cv2.resize(image, (640, 480))
+        print(f"[OK] Image redimensionnée : 640x480")
     print(f"[OK] Image chargée : {image.shape}")
     return image
 
@@ -57,7 +71,7 @@ def preprocess(image):
     print(f"[OK] Prétraitement terminé : {image.shape}")
     return image
 
-# ─── 3. INFÉRENCE (vrai modèle TFLite de A) ───────────────────
+# ─── 3. INFÉRENCE (compatible PC et Pi) ───────────────────────
 def inference(image):
     if USE_LITERT:
         interpreter = TFLiteInterpreter(model_path=MODEL_PATH)
@@ -76,6 +90,7 @@ def inference(image):
     ]
     print(f"[OK] Inférence réelle : {resultats[0]['maladie']}")
     return resultats
+
 # ─── 4. SAUVEGARDE SQLite ─────────────────────────────────────
 def save_to_db(resultats, image_path, latitude=None, longitude=None):
     conn = sqlite3.connect(DB_PATH)
@@ -116,7 +131,7 @@ def run_pipeline(image_path, latitude=None, longitude=None):
 
 if __name__ == "__main__":
     resultats = run_pipeline(
-        "data/feuille_01.jpg",
+        "data/feuille_reelle1.jpg",
         latitude=34.0209,
         longitude=-6.8416
     )

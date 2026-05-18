@@ -120,13 +120,13 @@ HTML = """
     <div class="upload-zone">
         <form method="POST" enctype="multipart/form-data">
             <input type="file" name="image" accept="image/*">
-            <button type="submit">🔍 ANALYSER</button>
+            <button type="submit"> ANALYSER</button>
         </form>
     </div>
 
     {% if resultats %}
     <div class="result">
-        <h2>📊 Résultats</h2>
+        <h2> Résultats</h2>
         {% for r in resultats %}
         <div class="result-item {% if loop.first %}top1{% endif %}">
             <p class="culture">{{ r.maladie.split('___')[0] if '___' in r.maladie else '' }}</p>
