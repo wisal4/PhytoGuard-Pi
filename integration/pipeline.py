@@ -8,6 +8,8 @@ import requests  # ← AJOUT : pour appeler l'API Flask
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from cv.pipeline_cv import apply_clahe, apply_grabcut, check_quality
 
+from cv.pipeline_cv import apply_clahe, apply_grabcut, check_quality, extract_hsv_features, extract_lbp_features
+
 # ─── Import TFLite (compatible PC et Pi) ──────────────────────
 try:
     from ai_edge_litert.interpreter import Interpreter as TFLiteInterpreter
@@ -59,18 +61,28 @@ def capture_image(image_path):
 
 # ─── 2. PRÉTRAITEMENT (pipeline de B) ─────────────────────────
 def preprocess(image):
+    # Qualité
     nette, score = check_quality(image)
     if not nette:
         print(f"[ATTENTION] Image floue (score: {score:.2f})")
-    image = apply_clahe(image)
-    image, mask = apply_grabcut(image)
-    image = cv2.resize(image, (224, 224))
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image = image.astype(np.float32) / 255.0
-    image = np.expand_dims(image, axis=0)
-    print(f"[OK] Prétraitement terminé : {image.shape}")
-    return image
-
+    
+    # Traitement B
+    image_clahe = apply_clahe(image)
+    image_grabcut, mask = apply_grabcut(image_clahe)
+    
+    # Extraire features de B (pour info)
+    hsv = extract_hsv_features(image_grabcut)
+    lbp = extract_lbp_features(image_grabcut)
+    print(f"[OK] HSV dominant : {hsv[0]:.2f} | LBP dominant : {lbp.max():.3f}")
+    
+    # Préparer pour TFLite (D)
+    image_resized = cv2.resize(image_grabcut, (224, 224))
+    image_rgb = cv2.cvtColor(image_resized, cv2.COLOR_BGR2RGB)
+    image_norm = image_rgb.astype(np.float32) / 255.0
+    image_final = np.expand_dims(image_norm, axis=0)
+    
+    print(f"[OK] Prétraitement terminé : {image_final.shape}")
+    return image_final
 
 # ─── 3. INFÉRENCE (compatible PC et Pi) ───────────────────────
 def inference(image):
