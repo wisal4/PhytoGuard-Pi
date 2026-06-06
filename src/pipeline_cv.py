@@ -1,9 +1,9 @@
 import cv2
 import numpy as np
 import os
-import csv
 from skimage.feature import local_binary_pattern
 
+# ─── 1. CHARGER UNE IMAGE ───────────────────────────────
 def load_image(path):
     img = cv2.imread(path)
     if img is None:
@@ -12,6 +12,7 @@ def load_image(path):
     print(f"✅ Image chargée : {img.shape}")
     return img
 
+# ─── 2. CLAHE (correction luminosité) ───────────────────
 def apply_clahe(img):
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
@@ -22,6 +23,7 @@ def apply_clahe(img):
     print("✅ CLAHE appliqué")
     return result
 
+# ─── 3. GRABCUT (segmentation feuille) ──────────────────
 def apply_grabcut(img):
     mask = np.zeros(img.shape[:2], np.uint8)
     bgd_model = np.zeros((1, 65), np.float64)
@@ -35,6 +37,7 @@ def apply_grabcut(img):
     print("✅ GrabCut appliqué")
     return result, mask2
 
+# ─── 4. QUALITÉ IMAGE ───────────────────────────────────
 def check_quality(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     score = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -45,6 +48,7 @@ def check_quality(img):
     print("✅ Image nette")
     return True, score
 
+# ─── 5. FEATURES HSV ────────────────────────────────────
 def extract_hsv_features(img):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     features = []
@@ -54,6 +58,7 @@ def extract_hsv_features(img):
     print(f"✅ Features HSV : {np.round(features, 2)}")
     return np.array(features)
 
+# ─── 6. FEATURES LBP ────────────────────────────────────
 def extract_lbp_features(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     lbp = local_binary_pattern(gray, P=8, R=1, method='uniform')
@@ -62,73 +67,112 @@ def extract_lbp_features(img):
     print(f"✅ Features LBP : {np.round(hist, 3)}")
     return hist
 
-def run_pipeline(image_path, category):
+# ─── 7. SAUVEGARDER IMAGE TRAITÉE ───────────────────────
+def save_processed_image(img_original, img_clahe, img_grabcut, 
+                          mask, image_name, output_dir="../output/processed"):
+    """
+    Sauvegarde 3 images :
+    1. Image originale
+    2. Image après CLAHE
+    3. Image après GrabCut (feuille isolée)
+    + Image comparaison côte à côte
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.splitext(image_name)[0]
+
+    # Sauvegarder les 3 images
+    path_original = os.path.join(output_dir, f"{base_name}_original.jpg")
+    path_clahe    = os.path.join(output_dir, f"{base_name}_clahe.jpg")
+    path_grabcut  = os.path.join(output_dir, f"{base_name}_grabcut.jpg")
+
+    cv2.imwrite(path_original, img_original)
+    cv2.imwrite(path_clahe, img_clahe)
+    cv2.imwrite(path_grabcut, img_grabcut)
+
+    # Image comparaison côte à côte
+    h, w = img_original.shape[:2]
+    comparison = np.zeros((h, w*3, 3), dtype=np.uint8)
+    comparison[:, :w]      = img_original
+    comparison[:, w:w*2]   = img_clahe
+    comparison[:, w*2:w*3] = img_grabcut
+
+    # Ajouter labels
+    cv2.putText(comparison, "ORIGINAL", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+    cv2.putText(comparison, "CLAHE", (w+10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+    cv2.putText(comparison, "GRABCUT", (w*2+10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+
+    path_comparison = os.path.join(output_dir, f"{base_name}_comparison.jpg")
+    cv2.imwrite(path_comparison, comparison)
+
+    print(f"💾 Images sauvegardées dans : {output_dir}")
+    print(f"   → {base_name}_original.jpg")
+    print(f"   → {base_name}_clahe.jpg")
+    print(f"   → {base_name}_grabcut.jpg")
+    print(f"   → {base_name}_comparison.jpg")
+
+    return path_grabcut  # Retourne l'image traitée pour Membre A
+
+# ─── PIPELINE COMPLET ────────────────────────────────────
+def run_pipeline(image_path):
     print(f"\n{'='*50}")
-    print(f"🌿 Catégorie : {category}")
-    print(f"📄 Fichier   : {os.path.basename(image_path)}")
+    print(f"🌿 Analyse : {os.path.basename(image_path)}")
     print(f"{'='*50}")
+
+    # Charger
     img = load_image(image_path)
     if img is None:
         return None
+
+    # Vérifier qualité
     nette, score = check_quality(img)
+    if not nette:
+        print("⚠️  Image rejetée — qualité insuffisante")
+
+    # Traitement
     img_clahe = apply_clahe(img)
     img_grabcut, mask = apply_grabcut(img_clahe)
-    hsv = extract_hsv_features(img_grabcut)
-    lbp = extract_lbp_features(img_grabcut)
-    print(f"✅ Pipeline terminé !")
+
+    # Extraire features
+    hsv_features = extract_hsv_features(img_grabcut)
+    lbp_features = extract_lbp_features(img_grabcut)
+
+    # ── NOUVEAU : Sauvegarder l'image traitée ──────────
+    image_name = os.path.basename(image_path)
+    path_traitee = save_processed_image(
+        img, img_clahe, img_grabcut, mask, image_name
+    )
+
+    print(f"\n✅ Pipeline terminé !")
+    print(f"   HSV features : {len(hsv_features)} valeurs")
+    print(f"   LBP features : {len(lbp_features)} valeurs")
+    print(f"   Image traitée : {path_traitee}")
+    print(f"   → Prête pour Membre A (EfficientNet) ✅")
+
     return {
-        "categorie": category,
-        "fichier": os.path.basename(image_path),
-        "nette": nette,
-        "score_nettete": round(score, 2),
-        "hsv_h_moy": round(hsv[0], 2),
-        "hsv_s_moy": round(hsv[2], 2),
-        "hsv_v_moy": round(hsv[4], 2),
-        "lbp_dominant": round(float(np.max(lbp)), 3),
+        'hsv_features': hsv_features,
+        'lbp_features': lbp_features,
+        'image_traitee': path_traitee,
+        'nettete': score,
+        'img_grabcut': img_grabcut
     }
 
+# ─── TEST SUR 5 IMAGES ───────────────────────────────────
 if __name__ == "__main__":
     base = "../data/images/PlantVillage/"
     categories = os.listdir(base)
-    resultats = []
-    images_ok = 0
-    images_floues = 0
+    count = 0
 
-    # ── Tester 20 images ──────────────────────────────
-    for cat in categories:
+    for cat in categories[:5]:
         cat_path = os.path.join(base, cat)
         images = os.listdir(cat_path)
-        if images and len(resultats) < 20:
+        if images:
             img_path = os.path.join(cat_path, images[0])
-            res = run_pipeline(img_path, cat)
-            if res:
-                resultats.append(res)
-                if res["nette"]:
-                    images_ok += 1
-                else:
-                    images_floues += 1
+            result = run_pipeline(img_path)
+            if result:
+                count += 1
 
-    # ── Sauvegarder en CSV ────────────────────────────
-    csv_path = "../output/resultats.csv"
-    os.makedirs("../output", exist_ok=True)
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=resultats[0].keys())
-        writer.writeheader()
-        writer.writerows(resultats)
-    print(f"\n💾 Résultats sauvegardés dans : {csv_path}")
-
-    # ── Statistiques globales ─────────────────────────
-    scores = [r["score_nettete"] for r in resultats]
-    print(f"""
-╔══════════════════════════════════════╗
-║        STATISTIQUES GLOBALES        ║
-╠══════════════════════════════════════╣
-║  Images analysées   : {len(resultats):>3}            ║
-║  Images nettes      : {images_ok:>3}            ║
-║  Images floues      : {images_floues:>3}            ║
-║  Score netteté min  : {min(scores):>8.2f}       ║
-║  Score netteté max  : {max(scores):>8.2f}       ║
-║  Score netteté moy  : {np.mean(scores):>8.2f}       ║
-╚══════════════════════════════════════╝
-    """)
-    print(f"🎉 Pipeline Semaine 1 terminé avec succès !")
+    print(f"\n🎉 {count} images traitées et sauvegardées !")
+    print(f"📁 Voir les images dans : ../output/processed/")
