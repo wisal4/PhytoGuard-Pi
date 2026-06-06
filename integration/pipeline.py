@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 import os
 import sys
-import sqlite3
 import json
+import requests  # ← AJOUT : pour appeler l'API Flask
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from cv.pipeline_cv import apply_clahe, apply_grabcut, check_quality
@@ -34,12 +34,12 @@ CLASS_NAMES = [
     "Tomato___Tomato_mosaic_virus", "Tomato___healthy"
 ]
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "phytoguard_int8.tflite")
-DB_PATH    = os.path.join(os.path.dirname(__file__), "..", "backend", "phytoguard.db")
+MODEL_PATH  = os.path.join(os.path.dirname(__file__), "..", "model", "phytoguard_int8.tflite")
+FLASK_URL   = "http://172.20.10.2:5000"  # ← URL du backend Flask (Membre C)
+
 
 # ─── 1. CAPTURE + redimensionnement automatique ───────────────
 def capture_image(image_path):
-    # Bug fix 1 : accepter .jpeg et .jpg
     if not os.path.exists(image_path):
         jpeg_path = image_path.replace(".jpg", ".jpeg")
         if os.path.exists(jpeg_path):
@@ -49,13 +49,13 @@ def capture_image(image_path):
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Image introuvable : {image_path}")
-    # Bug fix 2 : redimensionner si trop grande (évite Killed sur Pi)
     h, w = image.shape[:2]
     if w > 1024 or h > 1024:
         image = cv2.resize(image, (640, 480))
         print(f"[OK] Image redimensionnée : 640x480")
     print(f"[OK] Image chargée : {image.shape}")
     return image
+
 
 # ─── 2. PRÉTRAITEMENT (pipeline de B) ─────────────────────────
 def preprocess(image):
@@ -71,6 +71,7 @@ def preprocess(image):
     print(f"[OK] Prétraitement terminé : {image.shape}")
     return image
 
+
 # ─── 3. INFÉRENCE (compatible PC et Pi) ───────────────────────
 def inference(image):
     if USE_LITERT:
@@ -82,7 +83,7 @@ def inference(image):
     output_details = interpreter.get_output_details()
     interpreter.set_tensor(input_details[0]['index'], image)
     interpreter.invoke()
-    output = interpreter.get_tensor(output_details[0]['index'])[0]
+    output   = interpreter.get_tensor(output_details[0]['index'])[0]
     top3_idx = np.argsort(output)[-3:][::-1]
     resultats = [
         {"maladie": CLASS_NAMES[i], "confiance": float(output[i])}
@@ -91,50 +92,107 @@ def inference(image):
     print(f"[OK] Inférence réelle : {resultats[0]['maladie']}")
     return resultats
 
-# ─── 4. SAUVEGARDE SQLite ─────────────────────────────────────
-def save_to_db(resultats, image_path, latitude=None, longitude=None):
-    conn = sqlite3.connect(DB_PATH)
-    top1 = resultats[0]
-    culture = top1["maladie"].split("___")[0]
-    maladie = top1["maladie"].split("___")[1] if "___" in top1["maladie"] else top1["maladie"]
-    cursor = conn.execute(
-        """
-        INSERT INTO diagnostics (culture, maladie, confiance, top3, image_path)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            culture,
-            maladie,
-            top1["confiance"],
-            json.dumps(resultats),
-            image_path,
+
+# ─── 4. ENVOI AU BACKEND FLASK (Membre C) ─────────────────────
+# MODIFICATION : au lieu d'écrire directement en SQLite,
+# on appelle la route POST /diagnose du backend Flask.
+# Cela déclenche automatiquement :
+#   - La logique SEI (3 niveaux d'alerte)
+#   - Les règles agronomiques (agro_rules.json)
+#   - La recommandation du produit phytosanitaire
+#   - L'alerte SMS Twilio si niveau critique
+#   - La sauvegarde en base SQLite via Flask
+def send_to_flask(resultats, image_path, surface_lesions=None,
+                  latitude=None, longitude=None):
+    """
+    Envoie les résultats du diagnostic au backend Flask du Membre C.
+    Retourne la réponse Flask avec recommandation, SEI, produit, etc.
+    """
+    top1    = resultats[0]
+    parties = top1["maladie"].split("___")
+    culture = parties[0].lower() if len(parties) > 0 else "inconnu"
+    maladie = parties[1].lower() if len(parties) > 1 else top1["maladie"].lower()
+
+    # Préparer le corps de la requête
+    payload = {
+        "culture"        : culture,
+        "maladie"        : maladie,
+        "confiance"      : top1["confiance"],
+        "top3"           : resultats,
+        "image_path"     : image_path,
+    }
+
+    # Ajouter surface lésions si fournie (pipeline Membre B)
+    if surface_lesions is not None:
+        payload["surface_lesions"] = surface_lesions
+
+    # Ajouter GPS si disponible
+    if latitude is not None and longitude is not None:
+        payload["latitude"]  = latitude
+        payload["longitude"] = longitude
+
+    try:
+        response = requests.post(
+            f"{FLASK_URL}/diagnose",
+            json=payload,
+            timeout=10
         )
-    )
-    diagnostic_id = cursor.lastrowid
-    if latitude and longitude:
-        conn.execute(
-            "INSERT INTO geolocalisations (diagnostic_id, latitude, longitude) VALUES (?, ?, ?)",
-            (diagnostic_id, latitude, longitude)
-        )
-    conn.commit()
-    conn.close()
-    print(f"[OK] Diagnostic sauvegardé en base (id={diagnostic_id})")
-    return diagnostic_id
+        if response.status_code == 201:
+            data = response.json()
+            print(f"[OK] Diagnostic envoyé au backend Flask (id={data.get('diagnostic_id')})")
+            print(f"[OK] Niveau alerte : {data.get('niveau_alerte')}")
+            print(f"[OK] Recommandation : {data.get('recommandation')}")
+            print(f"[OK] Produit : {data.get('produit')} | Dose : {data.get('dose_g_l')} g/L")
+            if data.get('alerte_sms'):
+                print("[ALERTE] 🚨 SMS envoyé — niveau critique !")
+            return data
+        else:
+            print(f"[ERREUR] Flask a retourné : {response.status_code}")
+            return None
+    except requests.exceptions.ConnectionError:
+        print("[ERREUR] Flask non disponible — vérifier que app.py tourne")
+        return None
+
 
 # ─── 5. PIPELINE COMPLET ──────────────────────────────────────
-def run_pipeline(image_path, latitude=None, longitude=None):
-    image = capture_image(image_path)
+def run_pipeline(image_path, surface_lesions=None,
+                 latitude=None, longitude=None):
+    """
+    Pipeline complet :
+    1. Capture + redimensionnement
+    2. Prétraitement OpenCV (Membre B)
+    3. Inférence TFLite (Membre A)
+    4. Envoi au backend Flask (Membre C) → SEI + recommandation + SMS
+    """
+    image              = capture_image(image_path)
     image_preprocessed = preprocess(image)
-    resultats = inference(image_preprocessed)
-    save_to_db(resultats, image_path, latitude, longitude)
-    return resultats
+    resultats          = inference(image_preprocessed)
+    reponse_flask      = send_to_flask(
+        resultats,
+        image_path,
+        surface_lesions=surface_lesions,
+        latitude=latitude,
+        longitude=longitude
+    )
+    return resultats, reponse_flask
+
 
 if __name__ == "__main__":
-    resultats = run_pipeline(
-        "data/feuille_reelle1.jpg",
+    resultats, reponse = run_pipeline(
+        "data/feuille_reelle1.jpeg",
+        surface_lesions=25.0,   # % surface atteinte (Membre B)
         latitude=34.0209,
         longitude=-6.8416
     )
-    print("\n=== RÉSULTATS ===")
+    print("\n=== RÉSULTATS IA ===")
     for r in resultats:
         print(f"{r['maladie']} : {r['confiance']*100:.1f}%")
+
+    if reponse:
+        print("\n=== RECOMMANDATION BACKEND (Membre C) ===")
+        print(f"Niveau alerte  : {reponse.get('niveau_alerte')}")
+        print(f"Recommandation : {reponse.get('recommandation')}")
+        print(f"Produit        : {reponse.get('produit')}")
+        print(f"Dose           : {reponse.get('dose_g_l')} g/L")
+        print(f"Délai récolte  : {reponse.get('delai_recolte')} jours")
+        print(f"Alerte SMS     : {'OUI 🚨' if reponse.get('alerte_sms') else 'NON'}")

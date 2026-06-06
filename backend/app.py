@@ -1,4 +1,3 @@
-
 import json
 import sqlite3
 from datetime import datetime
@@ -6,7 +5,7 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-DB_PATH         = "phytoguard.db"
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "backend", "phytoguard.db")
 AGO_RULES_PATH  = "agro_rules.json"
 
 
@@ -18,6 +17,18 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+# ─────────────────────────────────────────────
+# Utilitaire : nettoyer le nom de la maladie
+# ─────────────────────────────────────────────
+def clean_maladie_name(maladie):
+    """Nettoie le nom retourné par l'IA (ex: Tomato___Late_blight -> Late_blight)"""
+    if not maladie:
+        return maladie
+    if '___' in maladie:
+        return maladie.split('___')[1]
+    return maladie
 
 
 # ─────────────────────────────────────────────
@@ -50,18 +61,6 @@ def index():
 
 # ─────────────────────────────────────────────
 # Route 2 : POST /diagnose
-# Corps JSON attendu :
-# {
-#   "culture"        : "tomate",
-#   "maladie"        : "mildiou",
-#   "confiance"      : 0.92,
-#   "top3"           : [...],          (optionnel)
-#   "severite_bbch"  : 2,              (optionnel, 0-4)
-#   "surface_lesions": 18.5,           (optionnel, % surface atteinte)
-#   "parcelle_id"    : 1,              (optionnel)
-#   "latitude"       : 34.01,          (optionnel)
-#   "longitude"      : -5.00           (optionnel)
-# }
 # ─────────────────────────────────────────────
 @app.route("/diagnose", methods=["POST"])
 def diagnose():
@@ -77,38 +76,56 @@ def diagnose():
             return jsonify({"erreur": f"Champ obligatoire manquant : {champ}"}), 400
 
     culture         = data["culture"]
-    maladie         = data["maladie"]
+    maladie_raw     = data["maladie"]
     confiance       = float(data["confiance"])
     severite_bbch   = data.get("severite_bbch", 0) or 0
     surface_lesions = data.get("surface_lesions", 0) or 0
 
+    # 🔧 NETTOYER LE NOM DE LA MALADIE
+    maladie = clean_maladie_name(maladie_raw)
+
+    print(f"[DEBUG] Maladie reçue : '{maladie_raw}' → nettoyée : '{maladie}'")
+
     # ── Récupération des règles depuis agro_rules.json ──
     rules = load_agro_rules()
-    rule  = rules.get(maladie, {}).get(culture) or rules.get(maladie, {}).get("*", {})
+    
+    # Chercher d'abord la maladie exacte, puis essayer avec .lower() si nécessaire
+    rule = rules.get(maladie, {})
+    if not rule:
+        # Essayer avec la version en minuscules
+        maladie_lower = maladie.lower()
+        for key in rules.keys():
+            if key.lower() == maladie_lower:
+                rule = rules.get(key, {})
+                maladie = key  # Garder la bonne casse
+                print(f"[DEBUG] Maladie trouvée avec casse différente : '{key}'")
+                break
+    
+    # Appliquer la règle par culture ou règle par défaut
+    rule_culture = rule.get(culture) or rule.get("*", {})
 
     # ── Comparaison avec le SEI (Seuil Économique d'Intervention) ──
-    sei = rule.get("sei", 10)
+    sei = rule_culture.get("sei", 10)
 
     if severite_bbch >= 4 or surface_lesions >= sei * 3:
-        # Stade critique — épidémique
-        recommandation = rule.get("recommandation_critique", "Stade épidémique — traitement urgent.")
+        recommandation = rule_culture.get("recommandation_critique", "Stade épidémique — traitement urgent.")
         niveau_alerte  = "critique"
         alerte_sms     = True
     elif surface_lesions >= sei or severite_bbch >= 2:
-        # Au-dessus du SEI → traitement curatif
-        recommandation = rule.get("recommandation_sur_sei", "Traitement curatif recommandé.")
+        recommandation = rule_culture.get("recommandation_sur_sei", "Traitement curatif recommandé.")
         niveau_alerte  = "intervention"
         alerte_sms     = False
     else:
-        # En dessous du SEI → surveillance simple
-        recommandation = rule.get("recommandation_sous_sei", "Surveiller à J+7.")
+        recommandation = rule_culture.get("recommandation_sous_sei", "Surveiller à J+7.")
         niveau_alerte  = "surveillance"
         alerte_sms     = False
 
-    produit            = rule.get("produit")
-    dose_g_l           = rule.get("dose_g_l")
-    delai_recolte      = rule.get("delai_recolte")
-    stade_phenologique = rule.get("stade_phenologique", "Non spécifié")
+    produit            = rule_culture.get("produit")
+    dose_g_l           = rule_culture.get("dose_g_l")
+    delai_recolte      = rule_culture.get("delai_recolte")
+    stade_phenologique = rule_culture.get("stade_phenologique", "Non spécifié")
+
+    print(f"[DEBUG] Règle trouvée : produit={produit}, dose={dose_g_l}")
 
     # ── Insertion dans diagnostics ──
     conn = get_db()
@@ -123,7 +140,7 @@ def diagnose():
         (
             data.get("parcelle_id"),
             culture,
-            maladie,
+            maladie,  # On utilise le nom nettoyé
             confiance,
             json.dumps(data.get("top3")),
             severite_bbch,
@@ -168,7 +185,6 @@ def diagnose():
 
 # ─────────────────────────────────────────────
 # Route 3 : GET /history
-# Paramètres optionnels : ?limite=20&culture=tomate&maladie=mildiou
 # ─────────────────────────────────────────────
 @app.route("/history", methods=["GET"])
 def history():
@@ -197,6 +213,68 @@ def history():
     return jsonify({
         "total"       : len(resultats),
         "diagnostics" : resultats
+    })
+    # ─────────────────────────────────────────────
+# Route 4 : POST /predict (pour recevoir l'image)
+# ─────────────────────────────────────────────
+@app.route("/predict", methods=["POST"])
+def predict():
+    """Reçoit une photo, l'analyse avec l'IA et envoie à l'API du Membre C"""
+    
+    import os
+    import requests
+    
+    # Récupérer l'image
+    image = request.files.get('image')
+    if not image:
+        return jsonify({"erreur": "Aucune image fournie"}), 400
+    
+    # Sauvegarder temporairement
+    image_path = "temp_image.jpg"
+    image.save(image_path)
+    
+    # Importer le pipeline existant
+    import sys
+    sys.path.append(os.path.join(os.path.dirname(__file__), "integration"))
+    from pipeline import capture_image, preprocess, inference
+    
+    # Analyser l'image
+    img = capture_image(image_path)
+    img_preprocessed = preprocess(img)
+    results = inference(img_preprocessed)
+    
+    # Nettoyer les résultats
+    top1 = results[0]
+    parties = top1["maladie"].split("___")
+    culture = parties[0].lower() if len(parties) > 0 else "inconnu"
+    maladie = parties[1] if len(parties) > 1 else top1["maladie"]
+    
+    # Envoyer à l'API du Membre C
+    MEMBRE_C_URL = "http://172.20.10.2:5000"  # ← IP de toi (Membre C)
+    
+    payload = {
+        "culture": culture,
+        "maladie": maladie,
+        "confiance": float(top1["confiance"]),
+        "surface_lesions": 25,
+        "severite_bbch": 2
+    }
+    
+    try:
+        response = requests.post(f"{MEMBRE_C_URL}/diagnose", json=payload, timeout=10)
+        if response.status_code == 201:
+            agro_data = response.json()
+        else:
+            agro_data = {"erreur": f"HTTP {response.status_code}"}
+    except Exception as e:
+        agro_data = {"erreur": str(e)}
+    
+    # Nettoyer
+    os.remove(image_path)
+    
+    return jsonify({
+        "ia": results,
+        "agro": agro_data
     })
 
 
